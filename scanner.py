@@ -8,6 +8,7 @@ import os
 import time
 import socket
 import warnings
+import traceback
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -81,7 +82,7 @@ def load_symbols(path: str = CSV_PATH) -> list:
     df = pd.read_csv(path)
     col = df.columns[0]
     syms = (
-        df[col].dropna().str.strip().str.upper()
+        df[col].dropna().astype(str).str.strip().str.upper()
         .pipe(lambda s: s[s != ""])
         .tolist()
     )
@@ -143,8 +144,8 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 df = df.copy()
                 df["_date"] = df.index.date
                 all_data[sym] = df
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Failed to process {sym}: {e}", flush=True)
 
         print(f"[FETCH] Batch {batch_num} done — {len(all_data)} symbols collected so far.",
               flush=True)
@@ -158,33 +159,37 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
 def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
     rows = []
     for sym, df in all_data.items():
-        day_df = df[df["_date"] == scan_date]
-        if day_df.empty:
-            continue
-        win = day_df.between_time(WINDOW_START, WINDOW_END)
-        if win.empty:
-            continue
+        try:
+            day_df = df[df["_date"] == scan_date]
+            if day_df.empty:
+                continue
+            win = day_df.between_time(WINDOW_START, WINDOW_END)
+            if win.empty:
+                continue
 
-        first_open = float(win["Open"].iat[0])
-        last_close = float(win["Close"].iat[-1])
-        max_high = float(win["High"].max())
-        day_close = float(day_df["Close"].iat[-1])
+            first_open = float(win["Open"].iat[0])
+            last_close = float(win["Close"].iat[-1])
+            max_high = float(win["High"].max())
+            day_close = float(day_df["Close"].iat[-1])
 
-        if first_open <= 0 or last_close <= 0:
-            continue
-        pct_gain = (last_close - first_open) / first_open * 100
-        if last_close <= first_open or pct_gain < MIN_WINDOW_GAIN_PCT:
-            continue
+            if first_open <= 0 or last_close <= 0:
+                continue
+            pct_gain = (last_close - first_open) / first_open * 100
+            if last_close <= first_open or pct_gain < MIN_WINDOW_GAIN_PCT:
+                continue
 
-        rows.append({
-            "symbol": sym,
-            "prev_close": round(day_close, 2),
-            "win_open": round(first_open, 2),
-            "win_close": round(last_close, 2),
-            "win_high": round(max_high, 2),
-            "pct_gain": round(pct_gain, 3),
-            "gap_skip_above": round(day_close * GAP_UP_FILTER_MULT, 2),
-        })
+            rows.append({
+                "symbol": sym,
+                "prev_close": round(day_close, 2),
+                "win_open": round(first_open, 2),
+                "win_close": round(last_close, 2),
+                "win_high": round(max_high, 2),
+                "pct_gain": round(pct_gain, 3),
+                "gap_skip_above": round(day_close * GAP_UP_FILTER_MULT, 2),
+            })
+        except Exception as e:
+            print(f"[WARN] scan_window failed for {sym}: {e}", flush=True)
+            continue
     return pd.DataFrame(rows)
 
 
@@ -208,38 +213,52 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
         current_price = None
         status = ""
 
-        df = all_data.get(sym)
-        day_df = df[df["_date"] == trade_date] if df is not None else pd.DataFrame()
+        try:
+            df = all_data.get(sym)
+            day_df = df[df["_date"] == trade_date] if df is not None else pd.DataFrame()
 
-        if phase == "PRE_OPEN":
-            status = "NOT BOUGHT YET"
-        elif phase in ("LIVE", "CLOSED"):
-            if day_df.empty:
-                status = "NO DATA"
+            if phase == "PRE_OPEN":
+                status = "NOT BOUGHT YET"
+            elif phase in ("LIVE", "CLOSED"):
+                if day_df.empty:
+                    status = "NO DATA"
+                else:
+                    entry_price = float(day_df["Open"].iat[0])
+                    current_price = float(day_df["Close"].iat[-1])
+                    status = "LIVE" if phase == "LIVE" else "CLOSED"
+
+            est_qty = int(CAPITAL_PER_TRADE // prev_close) if prev_close > 0 else 0
+
+            if entry_price and current_price:
+                pnl_pct = (current_price - entry_price) / entry_price * 100
+                pnl_rs = round((current_price - entry_price) * est_qty, 2)
             else:
-                entry_price = float(day_df["Open"].iat[0])
-                current_price = float(day_df["Close"].iat[-1])
-                status = "LIVE" if phase == "LIVE" else "CLOSED"
+                pnl_pct = 0.0
+                pnl_rs = 0.0
 
-        est_qty = int(CAPITAL_PER_TRADE // prev_close) if prev_close > 0 else 0
+            rows.append({
+                "symbol": sym,
+                "status": status,
+                "prev_close": prev_close,
+                "entry_price": round(entry_price, 2) if entry_price else None,
+                "current_price": round(current_price, 2) if current_price else None,
+                "qty": est_qty,
+                "pnl_pct": round(pnl_pct, 2),
+                "pnl_rs": pnl_rs,
+            })
+        except Exception as e:
+            print(f"[WARN] compute_pnl failed for {sym}: {e}", flush=True)
+            rows.append({
+                "symbol": sym,
+                "status": "ERROR",
+                "prev_close": prev_close,
+                "entry_price": None,
+                "current_price": None,
+                "qty": 0,
+                "pnl_pct": 0.0,
+                "pnl_rs": 0.0,
+            })
 
-        if entry_price and current_price:
-            pnl_pct = (current_price - entry_price) / entry_price * 100
-            pnl_rs = round((current_price - entry_price) * est_qty, 2)
-        else:
-            pnl_pct = 0.0
-            pnl_rs = 0.0
-
-        rows.append({
-            "symbol": sym,
-            "status": status,
-            "prev_close": prev_close,
-            "entry_price": round(entry_price, 2) if entry_price else None,
-            "current_price": round(current_price, 2) if current_price else None,
-            "qty": est_qty,
-            "pnl_pct": round(pnl_pct, 2),
-            "pnl_rs": pnl_rs,
-        })
     return pd.DataFrame(rows)
 
 
@@ -272,34 +291,48 @@ def run_scan():
         result["message"] = f"'{CSV_PATH}' not found on server."
         return result
 
-    scan_date = prev_trading_day(trade_date)
-    symbols = load_symbols(CSV_PATH)
+    # Everything below can throw for many reasons (bad data, empty frames,
+    # yfinance quirks, etc). Wrapping this ensures the cache in app.py
+    # ALWAYS gets a fresh, non-stale result every cycle — even on failure —
+    # instead of silently leaving the dashboard stuck on "Warming up".
+    try:
+        scan_date = prev_trading_day(trade_date)
+        symbols = load_symbols(CSV_PATH)
 
-    print(f"[SCAN] Starting scan for {len(symbols)} symbols "
-          f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})",
+        print(f"[SCAN] Starting scan for {len(symbols)} symbols "
+              f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})",
+              flush=True)
+
+        all_data = fetch_intraday(symbols, scan_date, trade_date)
+
+        if not all_data:
+            result["message"] = "No data fetched from Yahoo Finance. Will retry automatically."
+            return result
+
+        scan_df = scan_window(all_data, scan_date)
+        if scan_df.empty:
+            result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
+            return result
+
+        buylist = build_buylist(scan_df)
+        pnl_df = compute_pnl(buylist, all_data, trade_date, phase)
+
+        result["positions"] = pnl_df.to_dict(orient="records")
+        result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
+        result["winners"] = int((pnl_df["pnl_rs"] > 0).sum())
+        result["losers"] = int((pnl_df["pnl_rs"] < 0).sum())
+        result["scan_date"] = str(scan_date)
+
+        print(f"[SCAN] Complete — {len(result['positions'])} positions, "
+              f"total P&L Rs {result['total_pnl_rs']}", flush=True)
+
+    except Exception as e:
+        err = traceback.format_exc()
+        print(f"[SCAN ERROR] Exception inside run_scan(): {err}", flush=True)
+        result["message"] = f"Scan error: {e} (will retry next cycle in ~60s)"
+
+    print(f"[SCAN] run_scan returning: phase={result['phase']}, "
+          f"positions={len(result['positions'])}, message={result['message']}",
           flush=True)
-
-    all_data = fetch_intraday(symbols, scan_date, trade_date)
-
-    if not all_data:
-        result["message"] = "No data fetched from Yahoo Finance. Will retry automatically."
-        return result
-
-    scan_df = scan_window(all_data, scan_date)
-    if scan_df.empty:
-        result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
-        return result
-
-    buylist = build_buylist(scan_df)
-    pnl_df = compute_pnl(buylist, all_data, trade_date, phase)
-
-    result["positions"] = pnl_df.to_dict(orient="records")
-    result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
-    result["winners"] = int((pnl_df["pnl_rs"] > 0).sum())
-    result["losers"] = int((pnl_df["pnl_rs"] < 0).sum())
-    result["scan_date"] = str(scan_date)
-
-    print(f"[SCAN] Complete — {len(result['positions'])} positions, "
-          f"total P&L Rs {result['total_pnl_rs']}", flush=True)
 
     return result
