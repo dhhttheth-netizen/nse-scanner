@@ -49,25 +49,18 @@ def get_ist_now() -> datetime:
     return datetime.now(IST)
 
 def market_phase(now: datetime, trade_date: date) -> str:
-    """
-    PRE_OPEN : 07:00 - 08:59  -> positions not taken yet, P&L = 0
-    LIVE     : 09:15 - 15:29  -> market open, running P&L
-    CLOSED   : 15:30 - 17:59  -> market closed, final day P&L
-               (starts exactly at market close, no gap)
-    OTHER    : everything else -> outside tracking hours
-    """
     if trade_date.weekday() >= 5:
         return "WEEKEND"
 
     h, m = now.hour, now.minute
     minutes_now = h * 60 + m
 
-    PRE_OPEN_START = 7 * 60          # 07:00
-    PRE_OPEN_END   = 9 * 60 + 14     # 09:14 (LIVE starts 09:15)
-    LIVE_START     = 9 * 60 + 15     # 09:15
-    LIVE_END       = 15 * 60 + 29    # 15:29
-    CLOSED_START   = 15 * 60 + 30    # 15:30  <- closed starts right at market close
-    CLOSED_END     = 17 * 60 + 59    # 17:59
+    PRE_OPEN_START = 7 * 60
+    PRE_OPEN_END   = 9 * 60 + 14
+    LIVE_START     = 9 * 60 + 15
+    LIVE_END       = 15 * 60 + 29
+    CLOSED_START   = 15 * 60 + 30
+    CLOSED_END     = 17 * 60 + 59
 
     if PRE_OPEN_START <= minutes_now <= PRE_OPEN_END:
         return "PRE_OPEN"
@@ -122,3 +115,182 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
             except Exception as e:
                 print(f"[WARN] Batch {batch_num} attempt {attempt + 1} failed: {e}",
                       flush=True)
+                time.sleep(5 * (attempt + 1))
+
+        if raw is None or raw.empty:
+            time.sleep(BATCH_DELAY_SECONDS)
+            continue
+
+        for sym_ns, sym in zip(batch, batch_raw):
+            try:
+                df = raw.copy() if len(batch) == 1 else raw[sym_ns].copy()
+                df.dropna(how="all", inplace=True)
+                if df.empty:
+                    continue
+                if df.index.tz is None:
+                    df.index = df.index.tz_localize("UTC")
+                df.index = df.index.tz_convert("Asia/Kolkata")
+                df = df.between_time("09:15", "15:30")
+                if df.empty:
+                    continue
+                df = df.copy()
+                df["_date"] = df.index.date
+                all_data[sym] = df
+            except Exception:
+                pass
+
+        time.sleep(BATCH_DELAY_SECONDS)
+
+    return all_data
+
+
+# ── SCAN WINDOW ────────────────────────────────────────────────────────────
+
+def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
+    rows = []
+    for sym, df in all_data.items():
+        day_df = df[df["_date"] == scan_date]
+        if day_df.empty:
+            continue
+        win = day_df.between_time(WINDOW_START, WINDOW_END)
+        if win.empty:
+            continue
+
+        first_open = float(win["Open"].iat[0])
+        last_close = float(win["Close"].iat[-1])
+        max_high = float(win["High"].max())
+        day_close = float(day_df["Close"].iat[-1])
+
+        if first_open <= 0 or last_close <= 0:
+            continue
+        pct_gain = (last_close - first_open) / first_open * 100
+        if last_close <= first_open or pct_gain < MIN_WINDOW_GAIN_PCT:
+            continue
+
+        rows.append({
+            "symbol": sym,
+            "prev_close": round(day_close, 2),
+            "win_open": round(first_open, 2),
+            "win_close": round(last_close, 2),
+            "win_high": round(max_high, 2),
+            "pct_gain": round(pct_gain, 3),
+            "gap_skip_above": round(day_close * GAP_UP_FILTER_MULT, 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def build_buylist(scan_df: pd.DataFrame) -> pd.DataFrame:
+    if scan_df.empty:
+        return pd.DataFrame()
+    buylist = scan_df.nlargest(GAINER_TOP_N, "pct_gain").copy()
+    buylist.sort_values("pct_gain", ascending=False, inplace=True)
+    buylist.reset_index(drop=True, inplace=True)
+    return buylist
+
+
+# ── P&L ─────────────────────────────────────────────────────────────────────
+
+def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: str) -> pd.DataFrame:
+    rows = []
+    for _, row in buylist.iterrows():
+        sym = row["symbol"]
+        prev_close = row["prev_close"]
+        entry_price = None
+        current_price = None
+        status = ""
+
+        df = all_data.get(sym)
+        day_df = df[df["_date"] == trade_date] if df is not None else pd.DataFrame()
+
+        if phase == "PRE_OPEN":
+            status = "NOT BOUGHT YET"
+        elif phase in ("LIVE", "CLOSED"):
+            if day_df.empty:
+                status = "NO DATA"
+            else:
+                entry_price = float(day_df["Open"].iat[0])
+                current_price = float(day_df["Close"].iat[-1])
+                status = "LIVE" if phase == "LIVE" else "CLOSED"
+
+        est_qty = int(CAPITAL_PER_TRADE // prev_close) if prev_close > 0 else 0
+
+        if entry_price and current_price:
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+            pnl_rs = round((current_price - entry_price) * est_qty, 2)
+        else:
+            pnl_pct = 0.0
+            pnl_rs = 0.0
+
+        rows.append({
+            "symbol": sym,
+            "status": status,
+            "prev_close": prev_close,
+            "entry_price": round(entry_price, 2) if entry_price else None,
+            "current_price": round(current_price, 2) if current_price else None,
+            "qty": est_qty,
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_rs": pnl_rs,
+        })
+    return pd.DataFrame(rows)
+
+
+# ── MAIN ENTRYPOINT USED BY THE BACKGROUND THREAD ──────────────────────────
+
+def run_scan():
+    now = get_ist_now()
+    trade_date = now.date()
+    phase = market_phase(now, trade_date)
+
+    result = {
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
+        "trade_date": str(trade_date),
+        "phase": phase,
+        "positions": [],
+        "total_pnl_rs": 0.0,
+        "winners": 0,
+        "losers": 0,
+        "message": None,
+    }
+
+    if phase == "WEEKEND":
+        result["message"] = f"{trade_date} is a weekend. Market closed."
+        return result
+    if phase == "OTHER":
+        result["message"] = ("Outside tracking hours "
+                              "(7-8AM pre-open / 9:15AM-3:29PM live / 3:30-5PM final).")
+        return result
+    if not os.path.exists(CSV_PATH):
+        result["message"] = f"'{CSV_PATH}' not found on server."
+        return result
+
+    scan_date = prev_trading_day(trade_date)
+    symbols = load_symbols(CSV_PATH)
+
+    print(f"[SCAN] Starting scan for {len(symbols)} symbols "
+          f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})",
+          flush=True)
+
+    all_data = fetch_intraday(symbols, scan_date, trade_date)
+
+    if not all_data:
+        result["message"] = "No data fetched from Yahoo Finance. Will retry automatically."
+        return result
+
+    scan_df = scan_window(all_data, scan_date)
+    if scan_df.empty:
+        result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
+        return result
+
+    buylist = build_buylist(scan_df)
+    pnl_df = compute_pnl(buylist, all_data, trade_date, phase)
+
+    result["positions"] = pnl_df.to_dict(orient="records")
+    result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
+    result["winners"] = int((pnl_df["pnl_rs"] > 0).sum())
+    result["losers"] = int((pnl_df["pnl_rs"] < 0).sum())
+    result["scan_date"] = str(scan_date)
+
+    print(f"[SCAN] Complete — {len(result['positions'])} positions, "
+          f"total P&L Rs {result['total_pnl_rs']}", flush=True)
+
+    return result
