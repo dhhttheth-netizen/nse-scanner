@@ -36,6 +36,10 @@ WINDOW_START         = "14:15"
 WINDOW_END           = "15:30"
 
 
+def log(msg: str):
+    print(msg, flush=True)
+
+
 # ── DATE / TIME HELPERS ──────────────────────────────────────────────────
 
 def _skip_weekends(d: date, step: int) -> date:
@@ -105,8 +109,8 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
         batch = yf_syms[i:i + YF_BATCH_SIZE]
         batch_raw = [s.replace(".NS", "") for s in batch]
 
-        print(f"[FETCH] Batch {batch_num}/{total_batches}: "
-              f"{batch_raw[0]}...{batch_raw[-1]}", flush=True)
+        log(f"[FETCH] Batch {batch_num}/{total_batches}: "
+            f"{batch_raw[0]}...{batch_raw[-1]}")
 
         raw = None
         for attempt in range(BATCH_RETRIES + 1):
@@ -119,17 +123,18 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 )
                 break
             except Exception as e:
-                print(f"[WARN] Batch {batch_num} attempt {attempt + 1} failed: {e}",
-                      flush=True)
+                log(f"[WARN] Batch {batch_num} attempt {attempt + 1} failed: {e}")
                 time.sleep(5 * (attempt + 1))
 
         if raw is None or raw.empty:
-            print(f"[WARN] Batch {batch_num} returned no data after retries, skipping.",
-                  flush=True)
+            log(f"[WARN] Batch {batch_num} returned no data after retries, skipping.")
             time.sleep(BATCH_DELAY_SECONDS)
             continue
 
-        for sym_ns, sym in zip(batch, batch_raw):
+        log(f"[FETCH] Batch {batch_num} download() returned, "
+            f"shape={raw.shape}, now post-processing {len(batch)} symbols...")
+
+        for idx, (sym_ns, sym) in enumerate(zip(batch, batch_raw)):
             try:
                 df = raw.copy() if len(batch) == 1 else raw[sym_ns].copy()
                 df.dropna(how="all", inplace=True)
@@ -145,10 +150,9 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 df["_date"] = df.index.date
                 all_data[sym] = df
             except Exception as e:
-                print(f"[WARN] Failed to process {sym}: {e}", flush=True)
+                log(f"[WARN] Failed to process {sym} (item {idx}): {e}")
 
-        print(f"[FETCH] Batch {batch_num} done — {len(all_data)} symbols collected so far.",
-              flush=True)
+        log(f"[FETCH] Batch {batch_num} done — {len(all_data)} symbols collected so far.")
         time.sleep(BATCH_DELAY_SECONDS)
 
     return all_data
@@ -157,6 +161,7 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
 # ── SCAN WINDOW ────────────────────────────────────────────────────────────
 
 def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
+    log(f"[SCAN_WINDOW] Starting, {len(all_data)} symbols to check for scan_date={scan_date}")
     rows = []
     for sym, df in all_data.items():
         try:
@@ -188,8 +193,9 @@ def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
                 "gap_skip_above": round(day_close * GAP_UP_FILTER_MULT, 2),
             })
         except Exception as e:
-            print(f"[WARN] scan_window failed for {sym}: {e}", flush=True)
+            log(f"[WARN] scan_window failed for {sym}: {e}")
             continue
+    log(f"[SCAN_WINDOW] Done — {len(rows)} symbols passed filters")
     return pd.DataFrame(rows)
 
 
@@ -199,12 +205,14 @@ def build_buylist(scan_df: pd.DataFrame) -> pd.DataFrame:
     buylist = scan_df.nlargest(GAINER_TOP_N, "pct_gain").copy()
     buylist.sort_values("pct_gain", ascending=False, inplace=True)
     buylist.reset_index(drop=True, inplace=True)
+    log(f"[BUYLIST] {len(buylist)} symbols selected: {buylist['symbol'].tolist()}")
     return buylist
 
 
 # ── P&L ─────────────────────────────────────────────────────────────────────
 
 def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: str) -> pd.DataFrame:
+    log(f"[COMPUTE_PNL] Starting for {len(buylist)} symbols, phase={phase}")
     rows = []
     for _, row in buylist.iterrows():
         sym = row["symbol"]
@@ -247,7 +255,7 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
                 "pnl_rs": pnl_rs,
             })
         except Exception as e:
-            print(f"[WARN] compute_pnl failed for {sym}: {e}", flush=True)
+            log(f"[WARN] compute_pnl failed for {sym}: {e}")
             rows.append({
                 "symbol": sym,
                 "status": "ERROR",
@@ -259,12 +267,14 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
                 "pnl_rs": 0.0,
             })
 
+    log(f"[COMPUTE_PNL] Done — {len(rows)} rows computed")
     return pd.DataFrame(rows)
 
 
 # ── MAIN ENTRYPOINT USED BY THE BACKGROUND THREAD ──────────────────────────
 
 def run_scan():
+    log(f"[SCAN] run_scan() called. pandas={pd.__version__}")
     now = get_ist_now()
     trade_date = now.date()
     phase = market_phase(now, trade_date)
@@ -291,31 +301,32 @@ def run_scan():
         result["message"] = f"'{CSV_PATH}' not found on server."
         return result
 
-    # Everything below can throw for many reasons (bad data, empty frames,
-    # yfinance quirks, etc). Wrapping this ensures the cache in app.py
-    # ALWAYS gets a fresh, non-stale result every cycle — even on failure —
-    # instead of silently leaving the dashboard stuck on "Warming up".
     try:
         scan_date = prev_trading_day(trade_date)
         symbols = load_symbols(CSV_PATH)
 
-        print(f"[SCAN] Starting scan for {len(symbols)} symbols "
-              f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})",
-              flush=True)
+        log(f"[SCAN] Starting scan for {len(symbols)} symbols "
+            f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})")
 
         all_data = fetch_intraday(symbols, scan_date, trade_date)
+        log(f"[SCAN] fetch_intraday() returned, {len(all_data)} symbols in all_data")
 
         if not all_data:
             result["message"] = "No data fetched from Yahoo Finance. Will retry automatically."
             return result
 
         scan_df = scan_window(all_data, scan_date)
+        log(f"[SCAN] scan_window() returned, shape={scan_df.shape}")
+
         if scan_df.empty:
             result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
             return result
 
         buylist = build_buylist(scan_df)
+        log(f"[SCAN] build_buylist() returned, shape={buylist.shape}")
+
         pnl_df = compute_pnl(buylist, all_data, trade_date, phase)
+        log(f"[SCAN] compute_pnl() returned, shape={pnl_df.shape}")
 
         result["positions"] = pnl_df.to_dict(orient="records")
         result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
@@ -323,16 +334,15 @@ def run_scan():
         result["losers"] = int((pnl_df["pnl_rs"] < 0).sum())
         result["scan_date"] = str(scan_date)
 
-        print(f"[SCAN] Complete — {len(result['positions'])} positions, "
-              f"total P&L Rs {result['total_pnl_rs']}", flush=True)
+        log(f"[SCAN] Complete — {len(result['positions'])} positions, "
+            f"total P&L Rs {result['total_pnl_rs']}")
 
     except Exception as e:
         err = traceback.format_exc()
-        print(f"[SCAN ERROR] Exception inside run_scan(): {err}", flush=True)
+        log(f"[SCAN ERROR] Exception inside run_scan(): {err}")
         result["message"] = f"Scan error: {e} (will retry next cycle in ~60s)"
 
-    print(f"[SCAN] run_scan returning: phase={result['phase']}, "
-          f"positions={len(result['positions'])}, message={result['message']}",
-          flush=True)
+    log(f"[SCAN] run_scan returning: phase={result['phase']}, "
+        f"positions={len(result['positions'])}, message={result['message']}")
 
     return result
