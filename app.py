@@ -9,7 +9,6 @@ import scanner
 
 app = Flask(__name__)
 
-# ── Shared cache, updated by a background thread ────────────────────────
 _cache = {
     "data": {
         "generated_at": None,
@@ -27,12 +26,10 @@ _cache = {
 }
 _cache_lock = threading.Lock()
 
-SCAN_INTERVAL_SECONDS = 120   # how often the background thread rescans
+SCAN_INTERVAL_SECONDS = 60
 
 
 def background_scanner():
-    """Runs forever in a background thread, refreshing the cache periodically.
-    This NEVER blocks the Flask request/response cycle or the health check."""
     while True:
         try:
             with _cache_lock:
@@ -46,16 +43,24 @@ def background_scanner():
                 _cache["last_error"] = None
 
         except Exception as e:
+            # scanner.run_scan() now catches its own internal exceptions,
+            # so this branch should only fire for truly unexpected errors
+            # (e.g. import-level issues). Even so, we refresh _cache["data"]
+            # here too, so the dashboard NEVER stays stuck on "Warming up".
             err_text = f"{e}\n{traceback.format_exc()}"
             with _cache_lock:
                 _cache["last_error"] = err_text
+                prev = _cache["data"]
+                _cache["data"] = {
+                    **prev,
+                    "message": (f"Background scan crashed: {e}. "
+                                f"Check Render logs. Retrying in {SCAN_INTERVAL_SECONDS}s."),
+                }
             print(f"[SCAN ERROR] {err_text}", flush=True)
 
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 
-# Start the background thread once, when the app process boots.
-# use_reloader is off in production (gunicorn), so this runs exactly once.
 _scanner_thread = threading.Thread(target=background_scanner, daemon=True)
 _scanner_thread.start()
 
@@ -77,19 +82,18 @@ def api_pnl():
 
 @app.route("/api/status")
 def api_status():
-    """Debug endpoint — shows background thread health without exposing internals."""
     with _cache_lock:
         return jsonify({
             "last_run_started": _cache["last_run_started"],
             "last_run_finished": _cache["last_run_finished"],
             "has_error": _cache["last_error"] is not None,
+            "last_error": _cache["last_error"],
             "phase": _cache["data"].get("phase"),
         })
 
 
 @app.route("/healthz")
 def healthz():
-    # Always responds instantly — never blocked by the scanner thread
     return "ok", 200
 
 
