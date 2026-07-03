@@ -6,6 +6,7 @@ Used by app.py (via a background thread) to power the dashboard.
 
 import os
 import time
+import socket
 import warnings
 from datetime import date, datetime, timedelta
 
@@ -14,6 +15,9 @@ import pytz
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
+
+# Global safety net: no single network call in this process should hang forever.
+socket.setdefaulttimeout(30)
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -110,6 +114,7 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                     tickers=batch, start=start_str, end=end_str,
                     interval=YF_INTERVAL, group_by="ticker",
                     auto_adjust=False, progress=False, threads=True,
+                    timeout=30,
                 )
                 break
             except Exception as e:
@@ -118,6 +123,8 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 time.sleep(5 * (attempt + 1))
 
         if raw is None or raw.empty:
+            print(f"[WARN] Batch {batch_num} returned no data after retries, skipping.",
+                  flush=True)
             time.sleep(BATCH_DELAY_SECONDS)
             continue
 
@@ -139,6 +146,8 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
             except Exception:
                 pass
 
+        print(f"[FETCH] Batch {batch_num} done — {len(all_data)} symbols collected so far.",
+              flush=True)
         time.sleep(BATCH_DELAY_SECONDS)
 
     return all_data
