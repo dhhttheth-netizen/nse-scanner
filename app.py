@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import os
 from flask import Flask, render_template, jsonify
 from datetime import datetime
 import threading
@@ -26,30 +27,30 @@ _cache = {
 }
 _cache_lock = threading.Lock()
 
-print(f"[APP] Module loaded. _cache id={id(_cache)}", flush=True)
+print(f"[APP] Module loaded. PID={os.getpid()}, _cache id={id(_cache)}", flush=True)
 
 SCAN_INTERVAL_SECONDS = 60
 
 
 def background_scanner():
-    print(f"[BG] Thread started. _cache id={id(_cache)}", flush=True)
+    print(f"[BG] Thread started. PID={os.getpid()}, _cache id={id(_cache)}", flush=True)
     while True:
         try:
-            print("[BG] Starting scan cycle...", flush=True)
+            print(f"[BG] PID={os.getpid()} Starting scan cycle...", flush=True)
             with _cache_lock:
                 _cache["last_run_started"] = datetime.utcnow().isoformat()
 
             result = scanner.run_scan()
-            print(f"[BG] run_scan() returned, positions={len(result.get('positions', []))}, "
+            print(f"[BG] PID={os.getpid()} run_scan() returned, "
+                  f"positions={len(result.get('positions', []))}, "
                   f"message={result.get('message')}", flush=True)
 
             with _cache_lock:
                 _cache["data"] = result
                 _cache["last_run_finished"] = datetime.utcnow().isoformat()
                 _cache["last_error"] = None
-            print(f"[BG] Cache updated. _cache id={id(_cache)}, "
-                  f"_cache['data']['positions'] len={len(_cache['data'].get('positions', []))}",
-                  flush=True)
+            print(f"[BG] PID={os.getpid()} Cache updated. "
+                  f"positions len={len(_cache['data'].get('positions', []))}", flush=True)
 
         except Exception as e:
             err_text = f"{e}\n{traceback.format_exc()}"
@@ -61,15 +62,16 @@ def background_scanner():
                     "message": (f"Background scan crashed: {e}. "
                                 f"Check Render logs. Retrying in {SCAN_INTERVAL_SECONDS}s."),
                 }
-            print(f"[SCAN ERROR] {err_text}", flush=True)
+            print(f"[SCAN ERROR] PID={os.getpid()} {err_text}", flush=True)
 
-        print(f"[BG] Sleeping for {SCAN_INTERVAL_SECONDS}s...", flush=True)
+        print(f"[BG] PID={os.getpid()} Sleeping for {SCAN_INTERVAL_SECONDS}s...", flush=True)
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 
 _scanner_thread = threading.Thread(target=background_scanner, daemon=True)
 _scanner_thread.start()
-print(f"[APP] Background thread launched. alive={_scanner_thread.is_alive()}", flush=True)
+print(f"[APP] PID={os.getpid()} Background thread launched. alive={_scanner_thread.is_alive()}",
+      flush=True)
 
 
 @app.route("/")
@@ -84,7 +86,7 @@ def dashboard():
 def api_pnl():
     with _cache_lock:
         data = _cache["data"]
-    print(f"[API] /api/pnl called. _cache id={id(_cache)}, "
+    print(f"[API] PID={os.getpid()} /api/pnl called. "
           f"positions len={len(data.get('positions', []))}, phase={data.get('phase')}",
           flush=True)
     return jsonify(data)
@@ -100,6 +102,7 @@ def api_status():
             "last_error": _cache["last_error"],
             "phase": _cache["data"].get("phase"),
             "scanner_thread_alive": _scanner_thread.is_alive(),
+            "pid": os.getpid(),
         })
 
 
