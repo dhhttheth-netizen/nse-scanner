@@ -24,6 +24,7 @@
   .badge.closed { background: #2c2f3a; color: #9aa0a6; }
   .badge.notboughtyet { background: #3a3320; color: #e0c34c; }
   .badge.nodata { background: #3a2020; color: #ff8080; }
+  .badge.error { background: #3a2020; color: #ff8080; }
   .msg { background: #1a1d23; padding: 20px; border-radius: 10px; color: #9aa0a6; }
   .refresh-btn { background: #2c6df2; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .refresh-btn:hover { background: #1f57cc; }
@@ -87,14 +88,18 @@
 
 <script>
   async function fetchData() {
-    const res = await fetch("/api/pnl");
-    const data = await res.json();
-    render(data);
+    try {
+      const res = await fetch("/api/pnl");
+      const data = await res.json();
+      render(data);
+    } catch (e) {
+      console.error("Failed to fetch /api/pnl:", e);
+    }
   }
 
   function render(data) {
     document.getElementById("meta").innerHTML =
-      `Last updated: ${data.generated_at} &nbsp;|&nbsp; Trade date: ${data.trade_date} &nbsp;|&nbsp; Phase: ${data.phase}
+      `Last updated: ${data.generated_at ?? "—"} &nbsp;|&nbsp; Trade date: ${data.trade_date ?? "—"} &nbsp;|&nbsp; Phase: ${data.phase ?? "—"}
        &nbsp;&nbsp;<button class="refresh-btn" onclick="fetchData()">Refresh Now</button>`;
 
     const content = document.getElementById("content");
@@ -105,16 +110,18 @@
 
     let rows = "";
     for (const p of data.positions) {
-      const statusClass = p.status.toLowerCase().replace(/ /g, "");
+      const statusClass = (p.status || "").toLowerCase().replace(/ /g, "");
+      const pnlPct = p.pnl_pct ?? 0;
+      const pnlRs = p.pnl_rs ?? 0;
       rows += `<tr>
         <td>${p.symbol}</td>
         <td><span class="badge ${statusClass}">${p.status}</span></td>
         <td>${p.prev_close.toFixed(2)}</td>
-        <td>${p.entry_price !== null ? p.entry_price.toFixed(2) : "—"}</td>
-        <td>${p.current_price !== null ? p.current_price.toFixed(2) : "—"}</td>
+        <td>${p.entry_price !== null && p.entry_price !== undefined ? p.entry_price.toFixed(2) : "—"}</td>
+        <td>${p.current_price !== null && p.current_price !== undefined ? p.current_price.toFixed(2) : "—"}</td>
         <td>${p.qty}</td>
-        <td class="${p.pnl_pct >= 0 ? 'green' : 'red'}">${p.pnl_pct.toFixed(2)}%</td>
-        <td class="${p.pnl_rs >= 0 ? 'green' : 'red'}">₹${p.pnl_rs.toFixed(2)}</td>
+        <td class="${pnlPct >= 0 ? 'green' : 'red'}">${pnlPct.toFixed(2)}%</td>
+        <td class="${pnlRs >= 0 ? 'green' : 'red'}">₹${pnlRs.toFixed(2)}</td>
       </tr>`;
     }
 
