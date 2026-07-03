@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+buylist_*.csv
+.env
+venv/
