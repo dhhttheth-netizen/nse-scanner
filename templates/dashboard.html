@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NSE Buy Scanner — P&L Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #0f1115; color: #e6e6e6; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .meta { color: #9aa0a6; font-size: 13px; margin-bottom: 20px; }
+  .cards { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .card { background: #1a1d23; border-radius: 10px; padding: 16px 20px; min-width: 140px; }
+  .card .label { font-size: 12px; color: #9aa0a6; }
+  .card .value { font-size: 24px; font-weight: 600; margin-top: 4px; }
+  .green { color: #3ddc84; }
+  .red { color: #ff5c5c; }
+  table { width: 100%; border-collapse: collapse; background: #1a1d23; border-radius: 10px; overflow: hidden; }
+  th, td { padding: 10px 14px; text-align: right; font-size: 14px; border-bottom: 1px solid #262a33; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #20242c; color: #9aa0a6; font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .badge.live { background: #1f3d2e; color: #3ddc84; }
+  .badge.closed { background: #2c2f3a; color: #9aa0a6; }
+  .badge.notbought { background: #3a3320; color: #e0c34c; }
+  .badge.nodata { background: #3a2020; color: #ff8080; }
+  .msg { background: #1a1d23; padding: 20px; border-radius: 10px; color: #9aa0a6; }
+  .refresh-btn { background: #2c6df2; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .refresh-btn:hover { background: #1f57cc; }
+</style>
+</head>
+<body>
+
+<h1>NSE Next-Day Buy Scanner — Live P&L</h1>
+<div class="meta" id="meta">
+  Last updated: {{ data.generated_at }} &nbsp;|&nbsp; Trade date: {{ data.trade_date }} &nbsp;|&nbsp; Phase: {{ data.phase }}
+  &nbsp;&nbsp;<button class="refresh-btn" onclick="forceRefresh()">Refresh Now</button>
+</div>
+
+<div id="content">
+  {% if data.message %}
+    <div class="msg">{{ data.message }}</div>
+  {% else %}
+    <div class="cards" id="summary-cards">
+      <div class="card">
+        <div class="label">Total P&L</div>
+        <div class="value {{ 'green' if data.total_pnl_rs >= 0 else 'red' }}">₹{{ "%.2f"|format(data.total_pnl_rs) }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Winners</div>
+        <div class="value green">{{ data.winners }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Losers</div>
+        <div class="value red">{{ data.losers }}</div>
+      </div>
+      <div class="card">
+        <div class="label">Positions</div>
+        <div class="value">{{ data.positions|length }}</div>
+      </div>
+    </div>
+
+    <table id="pnl-table">
+      <thead>
+        <tr>
+          <th>Symbol</th><th>Status</th><th>Prev Close</th><th>Entry</th>
+          <th>Current</th><th>Qty</th><th>P&L %</th><th>P&L (₹)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in data.positions %}
+        <tr>
+          <td>{{ p.symbol }}</td>
+          <td><span class="badge {{ p.status|lower|replace(' ', '') }}">{{ p.status }}</span></td>
+          <td>{{ "%.2f"|format(p.prev_close) }}</td>
+          <td>{{ "%.2f"|format(p.entry_price) if p.entry_price else "—" }}</td>
+          <td>{{ "%.2f"|format(p.current_price) if p.current_price else "—" }}</td>
+          <td>{{ p.qty }}</td>
+          <td class="{{ 'green' if p.pnl_pct >= 0 else 'red' }}">{{ "%.2f"|format(p.pnl_pct) }}%</td>
+          <td class="{{ 'green' if p.pnl_rs >= 0 else 'red' }}">₹{{ "%.2f"|format(p.pnl_rs) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+
+<script>
+  // Auto-refresh the dashboard data every 60 seconds without a full page reload
+  async function fetchData(force) {
+    const url = force ? "/api/refresh" : "/api/pnl";
+    const res = await fetch(url);
+    const data = await res.json();
+    render(data);
+  }
+
+  function render(data) {
+    document.getElementById("meta").innerHTML =
+      `Last updated: ${data.generated_at} &nbsp;|&nbsp; Trade date: ${data.trade_date} &nbsp;|&nbsp; Phase: ${data.phase}
+       &nbsp;&nbsp;<button class="refresh-btn" onclick="forceRefresh()">Refresh Now</button>`;
+
+    const content = document.getElementById("content");
+    if (data.message) {
+      content.innerHTML = `<div class="msg">${data.message}</div>`;
+      return;
+    }
+
+    let rows = "";
+    for (const p of data.positions) {
+      const statusClass = p.status.toLowerCase().replace(/ /g, "");
+      rows += `<tr>
+        <td>${p.symbol}</td>
+        <td><span class="badge ${statusClass}">${p.status}</span></td>
+        <td>${p.prev_close.toFixed(2)}</td>
+        <td>${p.entry_price ? p.entry_price.toFixed(2) : "—"}</td>
+        <td>${p.current_price ? p.current_price.toFixed(2) : "—"}</td>
+        <td>${p.qty}</td>
+        <td class="${p.pnl_pct >= 0 ? 'green' : 'red'}">${p.pnl_pct.toFixed(2)}%</td>
+        <td class="${p.pnl_rs >= 0 ? 'green' : 'red'}">₹${p.pnl_rs.toFixed(2)}</td>
+      </tr>`;
+    }
+
+    content.innerHTML = `
+      <div class="cards">
+        <div class="card"><div class="label">Total P&L</div><div class="value ${data.total_pnl_rs >= 0 ? 'green' : 'red'}">₹${data.total_pnl_rs.toFixed(2)}</div></div>
+        <div class="card"><div class="label">Winners</div><div class="value green">${data.winners}</div></div>
+        <div class="card"><div class="label">Losers</div><div class="value red">${data.losers}</div></div>
+        <div class="card"><div class="label">Positions</div><div class="value">${data.positions.length}</div></div>
+      </div>
+      <table>
+        <thead><tr><th>Symbol</th><th>Status</th><th>Prev Close</th><th>Entry</th><th>Current</th><th>Qty</th><th>P&L %</th><th>P&L (₹)</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  function forceRefresh() { fetchData(true); }
+
+  setInterval(() => fetchData(false), 60000);  // auto refresh every 60s
+</script>
+
+</body>
+</html>
