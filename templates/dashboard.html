@@ -28,6 +28,7 @@
   .msg { background: #1a1d23; padding: 20px; border-radius: 10px; color: #9aa0a6; }
   .refresh-btn { background: #2c6df2; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .refresh-btn:hover { background: #1f57cc; }
+  .status-note { font-size: 12px; color: #6a6f78; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -86,15 +87,37 @@
   {% endif %}
 </div>
 
+<div class="status-note" id="statusNote"></div>
+
 <script>
   async function fetchData() {
     try {
       const res = await fetch("/api/pnl");
       const data = await res.json();
       render(data);
+      updateStatusNote(null);
     } catch (e) {
       console.error("Failed to fetch /api/pnl:", e);
+      updateStatusNote("Could not reach server — will retry automatically.");
     }
+  }
+
+  async function fetchStatus() {
+    try {
+      const res = await fetch("/api/status");
+      const status = await res.json();
+      if (status.has_error) {
+        console.warn("Background scan error:", status.last_error);
+      }
+    } catch (e) {
+      // status endpoint is best-effort, ignore failures here
+    }
+  }
+
+  function updateStatusNote(text) {
+    const el = document.getElementById("statusNote");
+    if (!el) return;
+    el.textContent = text || "";
   }
 
   function render(data) {
@@ -138,7 +161,13 @@
       </table>`;
   }
 
+  // Page load hote hi turant fetch karo — 60s ke wait ka intezaar mat karo
+  fetchData();
+  fetchStatus();
+
+  // Uske baad har 60s mein poll karte raho
   setInterval(fetchData, 60000);
+  setInterval(fetchStatus, 60000);
 </script>
 
 </body>
