@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 NSE Next-Day Buy Scanner — core logic module.
-Used by app.py to power the dashboard. No printing here — just data.
+Used by app.py (via a background thread) to power the dashboard.
+No printing / blocking here beyond normal logging — just data in, data out.
 """
 
 import os
+import time
 import warnings
 from datetime import date, datetime, timedelta
 
@@ -17,15 +19,17 @@ warnings.filterwarnings("ignore")
 IST = pytz.timezone("Asia/Kolkata")
 
 # ── CONFIG ───────────────────────────────────────────────────────────────
-CSV_PATH            = "5000.csv"
-GAINER_TOP_N        = 5
-MIN_WINDOW_GAIN_PCT = 1.5
-GAP_UP_FILTER_MULT  = 1.02
-CAPITAL_PER_TRADE   = 50_000
-YF_INTERVAL         = "1m"
-YF_BATCH_SIZE       = 50
-WINDOW_START        = "14:15"
-WINDOW_END          = "15:30"
+CSV_PATH             = "5000.csv"
+GAINER_TOP_N         = 5
+MIN_WINDOW_GAIN_PCT  = 1.5
+GAP_UP_FILTER_MULT   = 1.02
+CAPITAL_PER_TRADE    = 50_000
+YF_INTERVAL          = "1m"
+YF_BATCH_SIZE        = 25       # smaller batches = less likely to be rate-limited
+BATCH_DELAY_SECONDS  = 3        # pause between batches
+BATCH_RETRIES        = 2        # retry attempts per batch on failure
+WINDOW_START         = "14:15"
+WINDOW_END           = "15:30"
 
 
 # ── DATE / TIME HELPERS ──────────────────────────────────────────────────
@@ -71,7 +75,7 @@ def load_symbols(path: str = CSV_PATH) -> list:
     return [s.replace(".NS", "").replace(".NSE", "") for s in syms]
 
 
-# ── FETCH INTRADAY ───────────────────────────────────────────────────────
+# ── FETCH INTRADAY  (with retry + backoff to survive rate limiting) ──────
 
 def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
     start_str = (scan_date - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -80,20 +84,32 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
     yf_syms  = [s + ".NS" for s in symbols]
     all_data = {}
 
+    total_batches = (len(yf_syms) + YF_BATCH_SIZE - 1) // YF_BATCH_SIZE
+
     for i in range(0, len(yf_syms), YF_BATCH_SIZE):
+        batch_num = i // YF_BATCH_SIZE + 1
         batch     = yf_syms[i : i + YF_BATCH_SIZE]
         batch_raw = [s.replace(".NS", "") for s in batch]
 
-        try:
-            raw = yf.download(
-                tickers=batch, start=start_str, end=end_str,
-                interval=YF_INTERVAL, group_by="ticker",
-                auto_adjust=False, progress=False, threads=True,
-            )
-        except Exception:
-            continue
+        print(f"[FETCH] Batch {batch_num}/{total_batches}: "
+              f"{batch_raw[0]}...{batch_raw[-1]}", flush=True)
+
+        raw = None
+        for attempt in range(BATCH_RETRIES + 1):
+            try:
+                raw = yf.download(
+                    tickers=batch, start=start_str, end=end_str,
+                    interval=YF_INTERVAL, group_by="ticker",
+                    auto_adjust=False, progress=False, threads=True,
+                )
+                break
+            except Exception as e:
+                print(f"[WARN] Batch {batch_num} attempt {attempt+1} failed: {e}",
+                      flush=True)
+                time.sleep(5 * (attempt + 1))   # exponential-ish backoff
 
         if raw is None or raw.empty:
+            time.sleep(BATCH_DELAY_SECONDS)
             continue
 
         for sym_ns, sym in zip(batch, batch_raw):
@@ -113,6 +129,8 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 all_data[sym] = df
             except Exception:
                 pass
+
+        time.sleep(BATCH_DELAY_SECONDS)   # pause between batches — avoids rate limit
 
     return all_data
 
@@ -189,65 +207,4 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
             pnl_pct, pnl_rs = 0.0, 0.0
 
         rows.append({
-            "symbol": sym, "status": status, "prev_close": prev_close,
-            "entry_price": round(entry_price, 2) if entry_price else None,
-            "current_price": round(current_price, 2) if current_price else None,
-            "qty": est_qty, "pnl_pct": round(pnl_pct, 2), "pnl_rs": pnl_rs,
-        })
-    return pd.DataFrame(rows)
-
-
-# ── MAIN ENTRYPOINT USED BY THE DASHBOARD ────────────────────────────────
-
-def run_scan():
-    """
-    Runs the full pipeline and returns a plain dict (JSON-serialisable)
-    that the Flask dashboard can render.
-    """
-    now        = get_ist_now()
-    trade_date = now.date()
-    phase      = market_phase(now, trade_date)
-
-    result = {
-        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
-        "trade_date": str(trade_date),
-        "phase": phase,
-        "positions": [],
-        "total_pnl_rs": 0.0,
-        "winners": 0,
-        "losers": 0,
-        "message": None,
-    }
-
-    if phase == "WEEKEND":
-        result["message"] = f"{trade_date} is a weekend. Market closed."
-        return result
-    if phase == "OTHER":
-        result["message"] = "Outside tracking hours (7-8AM pre-open / 9:15AM-3:30PM live / 4-5PM final)."
-        return result
-    if not os.path.exists(CSV_PATH):
-        result["message"] = f"'{CSV_PATH}' not found on server."
-        return result
-
-    scan_date = prev_trading_day(trade_date)
-    symbols   = load_symbols(CSV_PATH)
-    all_data  = fetch_intraday(symbols, scan_date, trade_date)
-
-    if not all_data:
-        result["message"] = "No data fetched from Yahoo Finance. Try again shortly."
-        return result
-
-    scan_df = scan_window(all_data, scan_date)
-    if scan_df.empty:
-        result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
-        return result
-
-    buylist = build_buylist(scan_df)
-    pnl_df  = compute_pnl(buylist, all_data, trade_date, phase)
-
-    result["positions"]   = pnl_df.to_dict(orient="records")
-    result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
-    result["winners"]      = int((pnl_df["pnl_rs"] > 0).sum())
-    result["losers"]       = int((pnl_df["pnl_rs"] < 0).sum())
-    result["scan_date"]    = str(scan_date)
-    return result
+            "symbol": sym, "status": status, "prev_close":
