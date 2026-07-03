@@ -2,7 +2,6 @@
 """
 NSE Next-Day Buy Scanner — core logic module.
 Used by app.py (via a background thread) to power the dashboard.
-No printing / blocking here beyond normal logging — just data in, data out.
 """
 
 import os
@@ -25,9 +24,9 @@ MIN_WINDOW_GAIN_PCT  = 1.5
 GAP_UP_FILTER_MULT   = 1.02
 CAPITAL_PER_TRADE    = 50_000
 YF_INTERVAL          = "1m"
-YF_BATCH_SIZE        = 25       # smaller batches = less likely to be rate-limited
-BATCH_DELAY_SECONDS  = 3        # pause between batches
-BATCH_RETRIES        = 2        # retry attempts per batch on failure
+YF_BATCH_SIZE        = 50
+BATCH_DELAY_SECONDS  = 3
+BATCH_RETRIES        = 2
 WINDOW_START         = "14:15"
 WINDOW_END           = "15:30"
 
@@ -65,7 +64,7 @@ def market_phase(now: datetime, trade_date: date) -> str:
 # ── LOAD SYMBOLS ─────────────────────────────────────────────────────────
 
 def load_symbols(path: str = CSV_PATH) -> list:
-    df  = pd.read_csv(path)
+    df = pd.read_csv(path)
     col = df.columns[0]
     syms = (
         df[col].dropna().str.strip().str.upper()
@@ -75,20 +74,20 @@ def load_symbols(path: str = CSV_PATH) -> list:
     return [s.replace(".NS", "").replace(".NSE", "") for s in syms]
 
 
-# ── FETCH INTRADAY  (with retry + backoff to survive rate limiting) ──────
+# ── FETCH INTRADAY ────────────────────────────────────────────────────────
 
 def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
     start_str = (scan_date - timedelta(days=1)).strftime("%Y-%m-%d")
-    end_str   = (trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    end_str = (trade_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    yf_syms  = [s + ".NS" for s in symbols]
+    yf_syms = [s + ".NS" for s in symbols]
     all_data = {}
 
     total_batches = (len(yf_syms) + YF_BATCH_SIZE - 1) // YF_BATCH_SIZE
 
     for i in range(0, len(yf_syms), YF_BATCH_SIZE):
         batch_num = i // YF_BATCH_SIZE + 1
-        batch     = yf_syms[i : i + YF_BATCH_SIZE]
+        batch = yf_syms[i:i + YF_BATCH_SIZE]
         batch_raw = [s.replace(".NS", "") for s in batch]
 
         print(f"[FETCH] Batch {batch_num}/{total_batches}: "
@@ -104,9 +103,9 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
                 )
                 break
             except Exception as e:
-                print(f"[WARN] Batch {batch_num} attempt {attempt+1} failed: {e}",
+                print(f"[WARN] Batch {batch_num} attempt {attempt + 1} failed: {e}",
                       flush=True)
-                time.sleep(5 * (attempt + 1))   # exponential-ish backoff
+                time.sleep(5 * (attempt + 1))
 
         if raw is None or raw.empty:
             time.sleep(BATCH_DELAY_SECONDS)
@@ -130,12 +129,12 @@ def fetch_intraday(symbols: list, scan_date: date, trade_date: date) -> dict:
             except Exception:
                 pass
 
-        time.sleep(BATCH_DELAY_SECONDS)   # pause between batches — avoids rate limit
+        time.sleep(BATCH_DELAY_SECONDS)
 
     return all_data
 
 
-# ── SCAN WINDOW ───────────────────────────────────────────────────────────
+# ── SCAN WINDOW ────────────────────────────────────────────────────────────
 
 def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
     rows = []
@@ -149,8 +148,8 @@ def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
 
         first_open = float(win["Open"].iat[0])
         last_close = float(win["Close"].iat[-1])
-        max_high   = float(win["High"].max())
-        day_close  = float(day_df["Close"].iat[-1])
+        max_high = float(win["High"].max())
+        day_close = float(day_df["Close"].iat[-1])
 
         if first_open <= 0 or last_close <= 0:
             continue
@@ -159,9 +158,12 @@ def scan_window(all_data: dict, scan_date: date) -> pd.DataFrame:
             continue
 
         rows.append({
-            "symbol": sym, "prev_close": round(day_close, 2),
-            "win_open": round(first_open, 2), "win_close": round(last_close, 2),
-            "win_high": round(max_high, 2), "pct_gain": round(pct_gain, 3),
+            "symbol": sym,
+            "prev_close": round(day_close, 2),
+            "win_open": round(first_open, 2),
+            "win_close": round(last_close, 2),
+            "win_high": round(max_high, 2),
+            "pct_gain": round(pct_gain, 3),
             "gap_skip_above": round(day_close * GAP_UP_FILTER_MULT, 2),
         })
     return pd.DataFrame(rows)
@@ -176,13 +178,15 @@ def build_buylist(scan_df: pd.DataFrame) -> pd.DataFrame:
     return buylist
 
 
-# ── P&L ───────────────────────────────────────────────────────────────────
+# ── P&L ─────────────────────────────────────────────────────────────────────
 
 def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: str) -> pd.DataFrame:
     rows = []
     for _, row in buylist.iterrows():
-        sym, prev_close = row["symbol"], row["prev_close"]
-        entry_price = current_price = None
+        sym = row["symbol"]
+        prev_close = row["prev_close"]
+        entry_price = None
+        current_price = None
         status = ""
 
         df = all_data.get(sym)
@@ -194,7 +198,7 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
             if day_df.empty:
                 status = "NO DATA"
             else:
-                entry_price   = float(day_df["Open"].iat[0])
+                entry_price = float(day_df["Open"].iat[0])
                 current_price = float(day_df["Close"].iat[-1])
                 status = "LIVE" if phase == "LIVE" else "CLOSED"
 
@@ -202,9 +206,81 @@ def compute_pnl(buylist: pd.DataFrame, all_data: dict, trade_date: date, phase: 
 
         if entry_price and current_price:
             pnl_pct = (current_price - entry_price) / entry_price * 100
-            pnl_rs  = round((current_price - entry_price) * est_qty, 2)
+            pnl_rs = round((current_price - entry_price) * est_qty, 2)
         else:
-            pnl_pct, pnl_rs = 0.0, 0.0
+            pnl_pct = 0.0
+            pnl_rs = 0.0
 
         rows.append({
-            "symbol": sym, "status": status, "prev_close":
+            "symbol": sym,
+            "status": status,
+            "prev_close": prev_close,
+            "entry_price": round(entry_price, 2) if entry_price else None,
+            "current_price": round(current_price, 2) if current_price else None,
+            "qty": est_qty,
+            "pnl_pct": round(pnl_pct, 2),
+            "pnl_rs": pnl_rs,
+        })
+    return pd.DataFrame(rows)
+
+
+# ── MAIN ENTRYPOINT USED BY THE BACKGROUND THREAD ──────────────────────────
+
+def run_scan():
+    now = get_ist_now()
+    trade_date = now.date()
+    phase = market_phase(now, trade_date)
+
+    result = {
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S IST"),
+        "trade_date": str(trade_date),
+        "phase": phase,
+        "positions": [],
+        "total_pnl_rs": 0.0,
+        "winners": 0,
+        "losers": 0,
+        "message": None,
+    }
+
+    if phase == "WEEKEND":
+        result["message"] = f"{trade_date} is a weekend. Market closed."
+        return result
+    if phase == "OTHER":
+        result["message"] = ("Outside tracking hours "
+                              "(7-8AM pre-open / 9:15AM-3:30PM live / 4-5PM final).")
+        return result
+    if not os.path.exists(CSV_PATH):
+        result["message"] = f"'{CSV_PATH}' not found on server."
+        return result
+
+    scan_date = prev_trading_day(trade_date)
+    symbols = load_symbols(CSV_PATH)
+
+    print(f"[SCAN] Starting scan for {len(symbols)} symbols "
+          f"(scan_date={scan_date}, trade_date={trade_date}, phase={phase})",
+          flush=True)
+
+    all_data = fetch_intraday(symbols, scan_date, trade_date)
+
+    if not all_data:
+        result["message"] = "No data fetched from Yahoo Finance. Will retry automatically."
+        return result
+
+    scan_df = scan_window(all_data, scan_date)
+    if scan_df.empty:
+        result["message"] = f"No stocks passed filters on {scan_date}. Nothing to track today."
+        return result
+
+    buylist = build_buylist(scan_df)
+    pnl_df = compute_pnl(buylist, all_data, trade_date, phase)
+
+    result["positions"] = pnl_df.to_dict(orient="records")
+    result["total_pnl_rs"] = round(float(pnl_df["pnl_rs"].sum()), 2)
+    result["winners"] = int((pnl_df["pnl_rs"] > 0).sum())
+    result["losers"] = int((pnl_df["pnl_rs"] < 0).sum())
+    result["scan_date"] = str(scan_date)
+
+    print(f"[SCAN] Complete — {len(result['positions'])} positions, "
+          f"total P&L Rs {result['total_pnl_rs']}", flush=True)
+
+    return result
