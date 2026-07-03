@@ -27,13 +27,14 @@ _cache = {
 }
 _cache_lock = threading.Lock()
 
-print(f"[APP] Module loaded. PID={os.getpid()}, _cache id={id(_cache)}", flush=True)
-
 SCAN_INTERVAL_SECONDS = 60
 
+_scanner_thread = None
+_scanner_thread_lock = threading.Lock()
 
-def background_scanner():
-    print(f"[BG] Thread started. PID={os.getpid()}, _cache id={id(_cache)}", flush=True)
+
+def _background_scanner_loop():
+    print(f"[BG] Thread running in PID={os.getpid()}, _cache id={id(_cache)}", flush=True)
     while True:
         try:
             print(f"[BG] PID={os.getpid()} Starting scan cycle...", flush=True)
@@ -68,10 +69,24 @@ def background_scanner():
         time.sleep(SCAN_INTERVAL_SECONDS)
 
 
-_scanner_thread = threading.Thread(target=background_scanner, daemon=True)
-_scanner_thread.start()
-print(f"[APP] PID={os.getpid()} Background thread launched. alive={_scanner_thread.is_alive()}",
-      flush=True)
+def start_background_scanner():
+    """
+    Idempotently starts the background scanner thread in the CURRENT
+    process. Must be called from inside each gunicorn worker process
+    (via the post_fork hook in gunicorn.conf.py) — NOT at plain module
+    import time — otherwise the thread ends up running in gunicorn's
+    master process instead of the worker(s) that actually serve HTTP
+    requests, and the cache those workers see never gets updated.
+    """
+    global _scanner_thread
+    with _scanner_thread_lock:
+        if _scanner_thread is not None and _scanner_thread.is_alive():
+            print(f"[APP] PID={os.getpid()} scanner thread already running, skip.", flush=True)
+            return
+        _scanner_thread = threading.Thread(target=_background_scanner_loop, daemon=True)
+        _scanner_thread.start()
+        print(f"[APP] PID={os.getpid()} scanner thread started. "
+              f"alive={_scanner_thread.is_alive()}", flush=True)
 
 
 @app.route("/")
@@ -101,7 +116,7 @@ def api_status():
             "has_error": _cache["last_error"] is not None,
             "last_error": _cache["last_error"],
             "phase": _cache["data"].get("phase"),
-            "scanner_thread_alive": _scanner_thread.is_alive(),
+            "scanner_thread_alive": _scanner_thread.is_alive() if _scanner_thread else False,
             "pid": os.getpid(),
         })
 
@@ -112,4 +127,6 @@ def healthz():
 
 
 if __name__ == "__main__":
+    # Local/dev run (no gunicorn, no fork) — safe to start the thread here.
+    start_background_scanner()
     app.run(host="0.0.0.0", port=5000, debug=False)
