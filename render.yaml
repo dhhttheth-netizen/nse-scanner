@@ -1,0 +1,8 @@
+services:
+  - type: cron
+    name: nse-buy-scanner
+    runtime: python
+    plan: free
+    schedule: "35 10 * * 1-5"   # 10:35 UTC = 4:05 PM IST, Mon–Fri (after market close)
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python nse_date_scanner.py"
