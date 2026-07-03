@@ -22,7 +22,7 @@
   .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
   .badge.live { background: #1f3d2e; color: #3ddc84; }
   .badge.closed { background: #2c2f3a; color: #9aa0a6; }
-  .badge.notbought { background: #3a3320; color: #e0c34c; }
+  .badge.notboughtyet { background: #3a3320; color: #e0c34c; }
   .badge.nodata { background: #3a2020; color: #ff8080; }
   .msg { background: #1a1d23; padding: 20px; border-radius: 10px; color: #9aa0a6; }
   .refresh-btn { background: #2c6df2; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
@@ -34,14 +34,14 @@
 <h1>NSE Next-Day Buy Scanner — Live P&L</h1>
 <div class="meta" id="meta">
   Last updated: {{ data.generated_at }} &nbsp;|&nbsp; Trade date: {{ data.trade_date }} &nbsp;|&nbsp; Phase: {{ data.phase }}
-  &nbsp;&nbsp;<button class="refresh-btn" onclick="forceRefresh()">Refresh Now</button>
+  &nbsp;&nbsp;<button class="refresh-btn" onclick="fetchData()">Refresh Now</button>
 </div>
 
 <div id="content">
   {% if data.message %}
     <div class="msg">{{ data.message }}</div>
   {% else %}
-    <div class="cards" id="summary-cards">
+    <div class="cards">
       <div class="card">
         <div class="label">Total P&L</div>
         <div class="value {{ 'green' if data.total_pnl_rs >= 0 else 'red' }}">₹{{ "%.2f"|format(data.total_pnl_rs) }}</div>
@@ -60,7 +60,7 @@
       </div>
     </div>
 
-    <table id="pnl-table">
+    <table>
       <thead>
         <tr>
           <th>Symbol</th><th>Status</th><th>Prev Close</th><th>Entry</th>
@@ -86,10 +86,8 @@
 </div>
 
 <script>
-  // Auto-refresh the dashboard data every 60 seconds without a full page reload
-  async function fetchData(force) {
-    const url = force ? "/api/refresh" : "/api/pnl";
-    const res = await fetch(url);
+  async function fetchData() {
+    const res = await fetch("/api/pnl");
     const data = await res.json();
     render(data);
   }
@@ -97,7 +95,7 @@
   function render(data) {
     document.getElementById("meta").innerHTML =
       `Last updated: ${data.generated_at} &nbsp;|&nbsp; Trade date: ${data.trade_date} &nbsp;|&nbsp; Phase: ${data.phase}
-       &nbsp;&nbsp;<button class="refresh-btn" onclick="forceRefresh()">Refresh Now</button>`;
+       &nbsp;&nbsp;<button class="refresh-btn" onclick="fetchData()">Refresh Now</button>`;
 
     const content = document.getElementById("content");
     if (data.message) {
@@ -112,8 +110,8 @@
         <td>${p.symbol}</td>
         <td><span class="badge ${statusClass}">${p.status}</span></td>
         <td>${p.prev_close.toFixed(2)}</td>
-        <td>${p.entry_price ? p.entry_price.toFixed(2) : "—"}</td>
-        <td>${p.current_price ? p.current_price.toFixed(2) : "—"}</td>
+        <td>${p.entry_price !== null ? p.entry_price.toFixed(2) : "—"}</td>
+        <td>${p.current_price !== null ? p.current_price.toFixed(2) : "—"}</td>
         <td>${p.qty}</td>
         <td class="${p.pnl_pct >= 0 ? 'green' : 'red'}">${p.pnl_pct.toFixed(2)}%</td>
         <td class="${p.pnl_rs >= 0 ? 'green' : 'red'}">₹${p.pnl_rs.toFixed(2)}</td>
@@ -133,9 +131,7 @@
       </table>`;
   }
 
-  function forceRefresh() { fetchData(true); }
-
-  setInterval(() => fetchData(false), 60000);  // auto refresh every 60s
+  setInterval(fetchData, 60000);
 </script>
 
 </body>
