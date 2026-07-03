@@ -25,7 +25,7 @@ IST = pytz.timezone("Asia/Kolkata")
 # ── CONFIG ───────────────────────────────────────────────────────────────
 CSV_PATH             = "5000.csv"
 GAINER_TOP_N         = 5
-MIN_WINDOW_GAIN_PCT  = 1.5
+MIN_WINDOW_GAIN_PCT  = 0.1
 GAP_UP_FILTER_MULT   = 1.02
 CAPITAL_PER_TRADE    = 50_000
 YF_INTERVAL          = "1m"
