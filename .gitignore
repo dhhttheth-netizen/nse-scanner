@@ -1,5 +1,5 @@
 __pycache__/
 *.pyc
-buylist_*.csv
+*.csv.bak
 .env
 venv/
